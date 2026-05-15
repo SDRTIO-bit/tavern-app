@@ -2,20 +2,45 @@
 
 AI 角色扮演聊天应用，已演进为支持 **可组合 Workflow、图执行引擎、Agent 决策、目标驱动行为、持久化会话、通用变量系统、角色卡面板缓存和 HTML 面板渲染** 的 AI 运行时平台。
 
+## 环境依赖
+
+| 依赖 | 版本要求 | 说明 |
+|------|----------|------|
+| **Node.js** | ≥ 18.18 | 推荐 LTS 版本，可通过 `node -v` 检查 |
+| **pnpm** | ≥ 9.0 | 包管理器，可通过 `pnpm -v` 检查。如未安装：`npm install -g pnpm` |
+| **DeepSeek API Key** | — | AI 对话后端，需在 [platform.deepseek.com](https://platform.deepseek.com) 注册获取 |
+
+> 你也可以使用其他兼容 OpenAI API 的提供商，只需修改 `src/core/deepseek.ts` 中的端点配置。
+
 ## 快速开始
 
 ```bash
 # 1. 配置 API Key（创建 .env.local）
 echo DEEPSEEK_API_KEY=sk-你的key > .env.local
 
-# 2. 安装依赖
+# 2. 安装项目依赖
 pnpm install
 
 # 3. 启动开发服务器
 pnpm dev
 ```
 
-浏览器打开 **http://localhost:3000**。
+浏览器打开 **http://localhost:3000**，即可开始使用。
+
+> **Windows 用户**：如果遇到 `pnpm` 命令找不到，请以管理员身份运行 PowerShell 并执行 `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser`，然后重新打开终端。
+
+启动后终端会自动列出所有可访问的路由：
+
+```
+📋 可访问的路由:
+══════════════════════════════════════════════════
+  🏠 http://localhost:3000/                (首页)
+  📄 http://localhost:3000/workflow-demo   (workflow-demo)
+  🔌 http://localhost:3000/api/chat        (api/chat)
+══════════════════════════════════════════════════
+```
+
+遇到问题？详见 [`使用指南.md`](./使用指南.md) 的
 
 启动后终端会自动列出所有可访问的路由：
 
@@ -85,6 +110,23 @@ pnpm dev
 - 统一 Logger + 错误中间件
 - SSE 流式输出 + AbortController
 - 三种诊断端点（`/api/debug/env` `/ping` `/chat`）
+
+### Express 独立服务（可选）
+
+项目还包含一个独立的 OpenAI 兼容 API 服务器，用于外部客户端调用：
+
+```bash
+# 启动（使用 4000 端口）
+npx tsx src/server/index.ts
+```
+
+| 端点 | 用途 |
+|------|------|
+| `POST http://localhost:4000/v1/chat/completions` | OpenAI 兼容聊天 API |
+| `GET  http://localhost:4000/health` | 健康检查 |
+| `GET  http://localhost:4000/health/detail` | 详细诊断 |
+
+> 注意：此服务器与 Next.js 独立运行，共享同一个 `DEEPSEEK_API_KEY` 环境变量。
 
 ## 技术栈
 
