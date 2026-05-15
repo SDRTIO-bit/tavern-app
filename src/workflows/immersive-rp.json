@@ -1,0 +1,13 @@
+{
+  "id": "immersive-rp",
+  "name": "沉浸式 RP",
+  "description": "完整剧情模式：情绪分析→记忆检索→剧情推进→Prompt→模型，生成更沉浸",
+  "nodes": [
+    "emotion",
+    "memory",
+    "narrative",
+    "prompt",
+    "model"
+  ],
+  "tags": ["full", "immersive", "narrative"]
+}

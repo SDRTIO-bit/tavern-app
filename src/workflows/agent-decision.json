@@ -1,0 +1,25 @@
+{
+  "id": "agent-decision",
+  "name": "Agent 决策 RP",
+  "description": "Agent 观察→推理→决策：根据状态软评分选择路径",
+  "nodes": [
+    { "id": "n1", "type": "emotion" },
+    { "id": "n2", "type": "memory" },
+    { "id": "agent", "type": "agent" },
+    { "id": "n3", "type": "prompt" },
+    { "id": "n4", "type": "model" },
+    { "id": "n5", "type": "narrative" },
+    { "id": "n6", "type": "prompt" },
+    { "id": "n7", "type": "model" }
+  ],
+  "edges": [
+    { "id": "e1", "source": "n1", "target": "n2" },
+    { "id": "e2", "source": "n2", "target": "agent" },
+    { "id": "e3", "source": "agent", "target": "n3", "label": "快速路径", "condition": "n2.count < 3" },
+    { "id": "e4", "source": "agent", "target": "n5", "label": "剧情路径", "condition": "n2.count >= 3" },
+    { "id": "e5", "source": "n3", "target": "n4" },
+    { "id": "e6", "source": "n5", "target": "n6" },
+    { "id": "e7", "source": "n6", "target": "n7" }
+  ],
+  "tags": ["agent", "decision", "soft-routing"]
+}

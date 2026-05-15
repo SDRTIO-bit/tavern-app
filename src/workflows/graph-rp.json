@@ -1,0 +1,23 @@
+{
+  "id": "graph-rp",
+  "name": "图 RP（语义分支）",
+  "description": "Graph 语义执行：情绪→记忆→条件判断→快速/完整回复",
+  "nodes": [
+    { "id": "n1", "type": "emotion" },
+    { "id": "n2", "type": "memory" },
+    { "id": "n3", "type": "prompt" },
+    { "id": "n4", "type": "model" },
+    { "id": "n5", "type": "narrative" },
+    { "id": "n6", "type": "prompt" },
+    { "id": "n7", "type": "model" }
+  ],
+  "edges": [
+    { "id": "e1", "source": "n1", "target": "n2" },
+    { "id": "e2", "source": "n2", "target": "n3", "condition": "n2.count < 3", "label": "记忆少→快速" },
+    { "id": "e3", "source": "n2", "target": "n5", "condition": "n2.count >= 3", "label": "记忆多→剧情" },
+    { "id": "e4", "source": "n3", "target": "n4" },
+    { "id": "e5", "source": "n5", "target": "n6" },
+    { "id": "e6", "source": "n6", "target": "n7" }
+  ],
+  "tags": ["graph", "semantic", "branch"]
+}

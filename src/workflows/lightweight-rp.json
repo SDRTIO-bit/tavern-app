@@ -1,0 +1,11 @@
+{
+  "id": "lightweight-rp",
+  "name": "轻量 RP",
+  "description": "快速聊天模式：仅记忆+Prompt+模型，Token 消耗最低，不启用剧情/世界/NPC",
+  "nodes": [
+    "memory",
+    "prompt",
+    "model"
+  ],
+  "tags": ["fast", "low-token"]
+}
