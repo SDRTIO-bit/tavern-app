@@ -8,6 +8,7 @@
 import { buildPrompt } from "./promptBuilder";
 import { applyRegexScripts } from "./regexProcessor";
 import { matchWorldBook } from "./worldbook";
+import { processResponseVariables, buildVariablePromptInjection } from "./variableUpdateEngine";
 import type { PromptNode } from "./promptAST";
 import { EmotionRules } from "@/character/runtime/EmotionRules";
 import { getTopMemories } from "@/character/CharacterMemory";
@@ -296,7 +297,7 @@ class Runtime {
     // ═══════════════════════════════════════════
     // [Prompt] 构建 AST
     // ═══════════════════════════════════════════
-    const { system, messages: finalMessages, astNodes } = buildPrompt({
+    let { system, messages: finalMessages, astNodes } = buildPrompt({
       preset,
       characterSystemPrompt: this.characterSystemPrompt,
       worldBookEntries: this.worldBookEnabled ? this.worldBookEntries : [],
@@ -304,6 +305,17 @@ class Runtime {
       messages: history,
       userInput: processedInput,
     });
+
+    // ═══════════════════════════════════════════
+    // [变量] 注入当前游戏状态到 prompt
+    // ═══════════════════════════════════════════
+    const variableInjection = buildVariablePromptInjection();
+    if (variableInjection) {
+      system = system ? `${system}\n\n${variableInjection}` : variableInjection;
+      this.emit('system', '注入游戏变量状态', {
+        tokenEstimate: Math.ceil(variableInjection.length / 4),
+      });
+    }
 
     addStep("AST Nodes", astNodes.map((n) => `[${n.slot}] ${n.type}: ${n.content.slice(0, 60)}`).join("\n"));
     addStep("System Prompt", system);
@@ -392,6 +404,19 @@ class Runtime {
       if (finalContent !== fullContent) {
         addStep("Regex (Output)", `${fullContent.slice(0, 60)}… → ${finalContent.slice(0, 60)}…`);
       }
+    }
+
+    // ═══════════════════════════════════════════
+    // [变量] 提取并应用 AI 输出的变量更新
+    // ═══════════════════════════════════════════
+    const varResult = processResponseVariables(finalContent);
+    if (varResult.appliedCount > 0) {
+      finalContent = varResult.cleanedText;
+      this.emit('system', `变量更新: 应用 ${varResult.appliedCount} 条补丁`, {
+        children: varResult.blocks.flatMap((b) =>
+          b.patches.map((p) => `${p.op} ${p.path} → ${p.value}`)
+        ),
+      });
     }
 
     addStep("Final", finalContent.slice(0, 200));

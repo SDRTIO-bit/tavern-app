@@ -19,6 +19,8 @@ export type WorldBookEntry = {
   selective?: boolean;
   /** 额外触发键（选择性模式下需要额外匹配的键） */
   secondaryKeys?: string[];
+  /** 是否为常量条目（始终注入，不需要关键词触发） */
+  constant?: boolean;
 };
 
 /** WorldBook 完整数据（一本书） */

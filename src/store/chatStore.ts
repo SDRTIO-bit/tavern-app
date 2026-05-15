@@ -12,6 +12,8 @@ import { useWorldBookStore } from "./worldbookStore";
 import { usePresetStore } from "./presetStore";
 import { useANStore } from "./authorsNoteStore";
 import { useRegexStore } from "./regexStore";
+import { useUniversalVariableStore, parseInitVars } from "./universalVariableStore";
+import { cacheCardPanels } from "@/components/CachedPanelRenderer";
 
 /** 获取所有角色（内置 + 自定义） */
 function getAllCharacters(custom: Character[]): Character[] {
@@ -90,6 +92,40 @@ export const useChatStore = create<ChatState>()(
           updatedSessions[id] = buildGreetingMessages(char);
         }
 
+        // 同步角色关联的世界书到 runtime
+        const wbState = useWorldBookStore.getState();
+        const charBooks = wbState.books.filter(
+          (b) => !b.characterIds?.length || b.characterIds.includes(id)
+        );
+        runtime.worldBookEnabled = wbState.enabled;
+        runtime.worldBookEntries = charBooks.flatMap((b) => b.enabled ? b.entries : []);
+
+        // 同步正则脚本
+        const regexState = useRegexStore.getState();
+        runtime.regexScripts = regexState.scripts;
+        runtime.regexEnabled = regexState.enabled;
+
+        // 初始化通用变量存储（如果角色卡有 InitVar 世界书条目）
+        const universalVars = useUniversalVariableStore.getState();
+        universalVars.setCharacter(id);
+
+        // 尝试从世界书条目中解析初始变量
+        if (char.cardData?.characterBook?.entries) {
+          const initEntry = char.cardData.characterBook.entries.find(
+            (e) => e.comment?.includes("InitVar") || e.comment?.includes("初始化变量")
+          );
+          if (initEntry?.content && universalVars.initialized === false) {
+            try {
+              const parsed = parseInitVars(initEntry.content);
+              if (Object.keys(parsed).length > 0) {
+                universalVars.setVariables(parsed);
+              }
+            } catch {
+              // 解析失败，使用空变量
+            }
+          }
+        }
+
         runtime.configure({
           characterName: char.name,
           systemPrompt: char.systemPrompt,
@@ -109,6 +145,53 @@ export const useChatStore = create<ChatState>()(
         }
 
         const updated = [...customCharacters, char];
+
+        // 自动导入世界书
+        const cardBook = char.cardData?.characterBook;
+        if (cardBook?.entries?.length) {
+          const wbStore = useWorldBookStore.getState();
+          // 导入为独立的世界书
+          wbStore.importBook({
+            id: `wb_${char.id}`,
+            name: cardBook.name || `${char.name} - 世界书`,
+            entries: cardBook.entries,
+            enabled: true,
+            characterIds: [char.id],
+          });
+        }
+
+        // 自动导入正则脚本
+        // 自动检测 HTML 面板脚本：如果替换内容包含外部 URL 或 $('body').load，则禁用
+        const cardRegex = char.cardData?.embeddedRegexScripts;
+        if (cardRegex?.length) {
+          const regexStore = useRegexStore.getState();
+          for (const script of cardRegex) {
+            const isHtmlPanel =
+              script.replacement.includes("$('body').load(") ||
+              script.replacement.includes("https://") ||
+              script.replacement.includes("http://") ||
+              /\.load\(['"]/.test(script.replacement);
+            regexStore.addScript({
+              name: script.name,
+              pattern: script.pattern,
+              replacement: script.replacement,
+              enabled: isHtmlPanel ? false : script.enabled,
+              scope: script.scope,
+              global: script.global,
+              caseInsensitive: script.caseInsensitive,
+              runOn: script.runOn,
+              group: script.group,
+            });
+          }
+
+          // 异步预加载面板 HTML 到本地缓存
+          cacheCardPanels(char.id, cardRegex).then((panels) => {
+            const loaded = panels.filter((p) => p.status === "loaded").length;
+            if (loaded > 0) {
+              console.log(`[PanelCache] 预加载 ${loaded}/${panels.length} 个面板: ${char.name}`);
+            }
+          });
+        }
 
         // 自动选中新导入的角色
         set({

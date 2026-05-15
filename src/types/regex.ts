@@ -19,6 +19,14 @@ export type RegexScript = {
   runOn: RegexRunOn;
   /** 子目录（用于组织） */
   group?: string;
+  /** 最小深度（null = 无限制） */
+  minDepth?: number | null;
+  /** 最大深度（null = 无限制） */
+  maxDepth?: number | null;
+  /** 仅 Markdown 渲染后执行 */
+  markdownOnly?: boolean;
+  /** 放置位置（SillyTavern placement 数组） */
+  placement?: number[];
 };
 
 export type RegexScope = 'input' | 'output' | 'both';

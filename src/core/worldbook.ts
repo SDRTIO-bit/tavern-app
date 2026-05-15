@@ -31,14 +31,37 @@ export function matchWorldBook(
   }
 
   const matched: WorldBookEntry[] = [];
+  let totalLength = 0;
+  const MAX_WORLDBOOK_CHARS = 12000; // 约 3000 tokens 预算
 
   for (const entry of active) {
+    // 常量条目始终激活（不需要关键词）
+    if (entry.constant) {
+      // 预算检查：如果已经很大了，跳过低优先级常量条目
+      if (totalLength + entry.content.length > MAX_WORLDBOOK_CHARS && (entry.priority ?? 0) > 100) {
+        continue;
+      }
+      matched.push(entry);
+      totalLength += entry.content.length;
+      continue;
+    }
+
+    // 空关键词且非常量 → 跳过
+    if (!entry.keys?.length) {
+      continue;
+    }
+
     const hit = entry.keys.some((key) => {
       if (!key) return false;
       return texts.some((t) => t.toLowerCase().includes(key.toLowerCase()));
     });
     if (hit) {
+      // 关键词触发的条目更精确，始终加入（但仍有总预算）
+      if (totalLength + entry.content.length > MAX_WORLDBOOK_CHARS * 1.5) {
+        continue;
+      }
       matched.push(entry);
+      totalLength += entry.content.length;
     }
   }
 
@@ -46,9 +69,12 @@ export function matchWorldBook(
     return { entries: [], systemText: "" };
   }
 
+  // 按 priority 排序，priority 越小的在前面（插入顺序）
+  matched.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
+
   const systemText =
     "[WorldBook]\n" +
-    matched.map((e) => `[${e.id}]\n${e.content}`).join("\n\n");
+    matched.map((e) => `[${e.comment || e.id}]\n${e.content}`).join("\n\n");
 
   return { entries: matched, systemText };
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { WorkflowRegistry } from "@/workflowRuntime/WorkflowRegistry";
 import { WorkflowLoader } from "@/workflowRuntime/WorkflowLoader";
 import { WorkflowExecutor } from "@/workflowRuntime/WorkflowExecutor";
@@ -32,18 +32,35 @@ import GraphInspector from "@/components/runtime/GraphInspector";
 import TokenInspector from "@/components/runtime/TokenInspector";
 import type { RuntimeSnapshot } from "@/runtimeInspector/RuntimeTrace";
 
+// ---- 角色卡导入 + 通用系统 ----
+import { characters as builtInCharacters } from "@/core/characterLoader";
+import { parseCharacterFile } from "@/core/characterCardParser";
+import { useWorldBookStore } from "@/store/worldbookStore";
+import { useRegexStore } from "@/store/regexStore";
+import { useUniversalVariableStore, parseInitVars } from "@/store/universalVariableStore";
+import { processResponseVariables, buildVariablePromptInjection } from "@/core/variableUpdateEngine";
+import { matchWorldBook } from "@/core/worldbook";
+import { applyRegexScripts } from "@/core/regexProcessor";
+import { cacheCardPanels } from "@/components/CachedPanelRenderer";
+import UniversalPanelRenderer, { hasPanelTags, cleanPanelTags } from "@/components/UniversalPanelRenderer";
+import CachedPanelRenderer from "@/components/CachedPanelRenderer";
+import type { Character } from "@/types/character";
+
 import lightweightWf from "@/workflows/lightweight-rp.json";
 import immersiveWf from "@/workflows/immersive-rp.json";
 import graphRpWf from "@/workflows/graph-rp.json";
 import agentWf from "@/workflows/agent-decision.json";
-import { characters } from "@/core/characterLoader";
 
 const registry = new WorkflowRegistry();
 registry.registerAll(rpNodeRegistrations);
 registry.register(AGENT_DECISION_NODE);
 const loader = new WorkflowLoader(registry);
 loader.registerAll([lightweightWf, immersiveWf]);
-// graph-rp 是 GraphWorkflowDefinition（nodes+edges），不使用 WorkflowLoader
+
+let importIdCounter = 0;
+function genImportId(): string {
+  return `wf_imported_${Date.now()}_${++importIdCounter}`;
+}
 
 function createEventBus() {
   return new RuntimeEventBus();
@@ -69,6 +86,7 @@ export default function WorkflowDemoPage() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const [inspectorTab, setInspectorTab] = useState<"console" | "timeline" | "graph" | "token">("console");
   const [lastTimeline, setLastTimeline] = useState<TimelineEvent[]>([]);
   const [lastTimings, setLastTimings] = useState<NodeTiming[]>([]);
   const [lastDuration, setLastDuration] = useState(0);
@@ -78,9 +96,94 @@ export default function WorkflowDemoPage() {
   const [runtimeProfile, setRuntimeProfile] = useState<RuntimeProfile>(RUNTIME_PROFILES[1]);
   const [showProfileConfig, setShowProfileConfig] = useState(false);
   const [lastSnapshots, setLastSnapshots] = useState<RuntimeSnapshot[]>([]);
-  const [inspectorTab, setInspectorTab] = useState<"console" | "timeline" | "graph" | "token">("console");
+  const [showCharImport, setShowCharImport] = useState(false);
+
+  // ---- 自定义角色 ----
+  const [customCharacters, setCustomCharacters] = useState<Character[]>([]);
+  const [activeCharId, setActiveCharId] = useState<string>(builtInCharacters[0]?.id ?? "");
+  const allCharacters = useMemo(() => [...builtInCharacters, ...customCharacters], [customCharacters]);
+  const activeChar = useMemo(() => allCharacters.find((c) => c.id === activeCharId), [allCharacters, activeCharId]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const composer = new CapabilityComposer();
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // ---- 角色卡导入 ----
+  const handleImportChar = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const char = await parseCharacterFile(file);
+      // 去重
+      if (allCharacters.some((c) => c.name === char.name && c.id.includes("imported"))) {
+        alert(`角色 "${char.name}" 已导入`);
+        return;
+      }
+
+      // 导入世界书
+      const cardBook = char.cardData?.characterBook;
+      if (cardBook?.entries?.length) {
+        const wbStore = useWorldBookStore.getState();
+        wbStore.importBook({
+          id: `wb_${char.id}`,
+          name: cardBook.name || `${char.name} - 世界书`,
+          entries: cardBook.entries,
+          enabled: true,
+          characterIds: [char.id],
+        });
+      }
+
+      // 导入正则脚本（自动禁用 HTML 面板脚本）
+      const cardRegex = char.cardData?.embeddedRegexScripts;
+      if (cardRegex?.length) {
+        const regexStore = useRegexStore.getState();
+        for (const script of cardRegex) {
+          const isHtmlPanel =
+            script.replacement.includes("$('body').load(") ||
+            script.replacement.includes("https://") ||
+            /\.load\(['"]/.test(script.replacement);
+          regexStore.addScript({
+            name: script.name,
+            pattern: script.pattern,
+            replacement: script.replacement,
+            enabled: isHtmlPanel ? false : script.enabled,
+            scope: script.scope,
+            global: script.global,
+            caseInsensitive: script.caseInsensitive,
+            runOn: script.runOn,
+            group: script.group,
+          });
+        }
+        cacheCardPanels(char.id, cardRegex);
+      }
+
+      // 解析初始变量
+      const initEntry = char.cardData?.characterBook?.entries.find(
+        (e) => e.comment?.includes("InitVar") || e.comment?.includes("初始化变量")
+      );
+      if (initEntry?.content) {
+        const parsed = parseInitVars(initEntry.content);
+        if (Object.keys(parsed).length > 0) {
+          useUniversalVariableStore.getState().setVariables(parsed);
+        }
+      }
+
+      setCustomCharacters((prev) => [...prev, char]);
+      setActiveCharId(char.id);
+
+      // 新建会话
+      const s = newSession({
+        name: `与 ${char.name} 的对话`,
+        characterId: char.id,
+        characterName: char.name,
+        workflowId: activeWfId,
+      });
+      setTimeout(() => addAssistantMessage(char.greeting), 0);
+    } catch (err) {
+      alert(`导入失败: ${err instanceof Error ? err.message : "未知错误"}`);
+    }
+    e.target.value = "";
+  };
 
   // 从 session 读取 workflow
   const activeProfile = getProfileById(activeProfileId);
@@ -91,7 +194,7 @@ export default function WorkflowDemoPage() {
   // 初始化：没有 session 则自动创建
   useEffect(() => {
     if (sessions.length === 0) {
-      const char = characters[0];
+      const char = activeChar || builtInCharacters[0];
       newSession({
         name: `与 ${char.name} 的对话`,
         characterId: char.id,
@@ -106,18 +209,18 @@ export default function WorkflowDemoPage() {
   // 首次 greeting
   useEffect(() => {
     if (activeSession && activeSession.messages.length === 0) {
-      const char = characters[0];
+      const char = activeChar || builtInCharacters[0];
       const greeting = char.greeting || "你好！";
       addAssistantMessage(greeting);
     }
-  }, [activeSession?.id]);
+  }, [activeSession?.id, activeCharId]);
 
   const scrollToBottom = useCallback(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, []);
 
   const handleNewSession = () => {
-    const char = characters[0];
+    const char = activeChar || builtInCharacters[0];
     const s = newSession({
       name: `与 ${char.name} 的对话 ${sessions.length + 1}`,
       characterId: char.id,
@@ -125,10 +228,8 @@ export default function WorkflowDemoPage() {
       workflowId: activeWfId,
     });
     const greeting = char.greeting || "你好！";
-    // 需要等 session 创建后再加 greeting
     setTimeout(() => addAssistantMessage(greeting), 0);
 
-    // 关联 workflow profile
     const matchingProfile = profiles.find((p) => p.workflowId === activeWfId);
     if (matchingProfile) setActiveProfileId(matchingProfile.id);
   };
@@ -148,24 +249,60 @@ export default function WorkflowDemoPage() {
 
     scrollToBottom();
 
-    const char = characters[0];
+    const char = activeChar || builtInCharacters[0];
 
     // 判断线性 vs 图工作流
-  const isGraph = activeWfId === 'graph-rp' || activeWfId === 'agent-decision';
+    const isGraph = activeWfId === 'graph-rp' || activeWfId === 'agent-decision';
 
     // 从 session 取最新数据
     const latestSession = useSessionStore.getState().getActive();
     const allMessages = latestSession?.messages ?? [];
     const historyMessages = allMessages.slice(0, -1);
 
+    // ---- WorldBook 匹配 ----
+    let worldbookText = "";
+    const wbState = useWorldBookStore.getState();
+    if (wbState.enabled) {
+      const charBooks = wbState.books.filter(
+        (b) => !b.characterIds?.length || b.characterIds.includes(char.id)
+      );
+      const wbEntries = charBooks.flatMap((b) => b.enabled ? b.entries : []);
+      const textsToMatch = historyMessages
+        .slice(-5)
+        .map((m) => m.content)
+        .concat(text)
+        .filter(Boolean);
+      const { systemText } = matchWorldBook(wbEntries, textsToMatch);
+      worldbookText = systemText;
+    }
+
+    // ---- 正则处理输入 ----
+    let processedInput = text;
+    const regexState = useRegexStore.getState();
+    if (regexState.enabled && regexState.scripts.length > 0) {
+      processedInput = applyRegexScripts(text, regexState.scripts, "input");
+    }
+
+    // ---- 变量注入 ----
+    const varInjection = buildVariablePromptInjection();
+
+    // 组装增强后的 systemPrompt
+    let enhancedSystemPrompt = char?.systemPrompt || "";
+    if (worldbookText) enhancedSystemPrompt = enhancedSystemPrompt
+      ? `${enhancedSystemPrompt}\n\n${worldbookText}`
+      : worldbookText;
+    if (varInjection) enhancedSystemPrompt = enhancedSystemPrompt
+      ? `${enhancedSystemPrompt}\n\n${varInjection}`
+      : varInjection;
+
     // 构建 context
     const ctx: WorkflowExecutionContext = {
       sessionId: activeSession.id,
       workflowId: activeWfId,
       characterName: char?.name || "Unknown",
-      systemPrompt: char?.systemPrompt || "",
+      systemPrompt: enhancedSystemPrompt,
       messages: historyMessages.map((m) => ({ role: m.role, content: m.content })),
-      userInput: text,
+      userInput: processedInput,
       emotion: latestSession?.emotion ?? {
         happiness: 50, stress: 50, trust: 50, affection: 50, anger: 50, loneliness: 50, curiosity: 50,
       },
@@ -219,7 +356,21 @@ export default function WorkflowDemoPage() {
         setLastDuration(result.durationMs);
       }
 
-      addAssistantMessage(output);
+      // ---- 后处理：正则 + 变量更新 + 清洗面板标签 ----
+      let finalOutput = output;
+
+      // 正则处理输出
+      if (regexState.enabled && regexState.scripts.length > 0) {
+        finalOutput = applyRegexScripts(finalOutput, regexState.scripts, "output");
+      }
+
+      // 提取并应用变量更新
+      const varResult = processResponseVariables(finalOutput);
+      if (varResult.appliedCount > 0) {
+        finalOutput = varResult.cleanedText;
+      }
+
+      addAssistantMessage(finalOutput);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : "执行失败";
       addAssistantMessage(`[错误] ${errMsg}`);
@@ -238,8 +389,65 @@ export default function WorkflowDemoPage() {
 
   return (
     <main className="flex h-screen bg-zinc-950 text-white" suppressHydrationWarning>
-      {/* ========== 左侧：Session + Profile ========== */}
+      {/* ========== 左侧：Session + Profile + 角色 ========== */}
       <aside className="flex w-60 flex-col border-r border-zinc-800 bg-zinc-950">
+        {/* 角色选择 */}
+        <div className="border-b border-zinc-800 px-3 py-2">
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="text-[10px] font-medium uppercase text-zinc-600">角色</span>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="rounded bg-blue-600 px-2 py-0.5 text-[10px] text-white hover:bg-blue-500"
+            >
+              + 导入
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,.png"
+              onChange={handleImportChar}
+              className="hidden"
+            />
+          </div>
+          <div className="max-h-28 space-y-0.5 overflow-y-auto">
+            {allCharacters.map((c) => (
+              <button
+                key={c.id}
+                onClick={() => {
+                  setActiveCharId(c.id);
+                  useUniversalVariableStore.getState().setCharacter(c.id);
+                  // 解析初始变量
+                  const initEntry = c.cardData?.characterBook?.entries.find(
+                    (e) => e.comment?.includes("InitVar") || e.comment?.includes("初始化变量")
+                  );
+                  if (initEntry?.content) {
+                    const parsed = parseInitVars(initEntry.content);
+                    if (Object.keys(parsed).length > 0) {
+                      useUniversalVariableStore.getState().setVariables(parsed);
+                    }
+                  }
+                }}
+                className={`w-full rounded px-2 py-1 text-left text-[10px] transition cursor-pointer ${
+                  activeCharId === c.id
+                    ? "bg-blue-600/20 text-blue-300 ring-1 ring-blue-500/50"
+                    : "text-zinc-400 hover:bg-zinc-800"
+                }`}
+              >
+                <span className="truncate">{c.name}</span>
+                {c.cardData?.creator && (
+                  <span className="ml-1 text-[8px] text-zinc-600">by {c.cardData.creator}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* 变量状态栏 */}
+        <div className="border-b border-zinc-800 px-3 py-1.5">
+          <span className="text-[9px] text-zinc-500">
+            {useUniversalVariableStore((s) => s.getStatusLine())}
+          </span>
+        </div>
         {/* Session 列表 */}
         <div className="border-b border-zinc-800 px-3 py-2">
           <div className="mb-1.5 flex items-center justify-between">
@@ -433,20 +641,46 @@ export default function WorkflowDemoPage() {
 
         {/* 消息列表 */}
         <div className="flex-1 space-y-4 overflow-y-auto p-4">
-          {hasHydrated && activeSession?.messages.map((m) => (
-            <div
-              key={m.id}
-              className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
-            >
+          {hasHydrated && activeSession?.messages.map((m) => {
+            const isUser = m.role === "user";
+            const showPanels = !isUser && hasPanelTags(m.content);
+            const cleanText = showPanels ? cleanPanelTags(m.content) : m.content;
+
+            return (
               <div
-                className={`max-w-[65%] rounded-2xl px-4 py-2.5 leading-relaxed ${
-                  m.role === "user" ? "bg-blue-600 text-white" : "bg-zinc-800 text-zinc-100"
-                }`}
+                key={m.id}
+                className={`flex ${isUser ? "justify-end" : "justify-start"}`}
               >
-                <span className="whitespace-pre-wrap text-sm">{m.content}</span>
+                <div
+                  className={`max-w-[65%] rounded-2xl px-4 py-2.5 leading-relaxed ${
+                    isUser ? "bg-blue-600 text-white" : "bg-zinc-800 text-zinc-100"
+                  }`}
+                >
+                  {/* 面板渲染 */}
+                  {showPanels && (
+                    <>
+                      <UniversalPanelRenderer
+                        content={m.content}
+                        characterName={activeChar?.name}
+                        creator={activeChar?.cardData?.creator}
+                        inline
+                      />
+                      {activeChar && (
+                        <CachedPanelRenderer
+                          content={m.content}
+                          characterId={activeChar.id}
+                        />
+                      )}
+                    </>
+                  )}
+                  {/* 清洗后的文本 */}
+                  {cleanText && (
+                    <span className="whitespace-pre-wrap text-sm">{cleanText}</span>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
           {isLoading && (
             <div className="flex justify-start">
               <div className="rounded-2xl bg-zinc-800 px-4 py-2.5">

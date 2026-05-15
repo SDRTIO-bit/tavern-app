@@ -4,27 +4,153 @@
 // 支持：
 //   - JSON V1（TavernAI 格式）
 //   - JSON V2（SillyTavern chara_card_v2 格式）
-//   - PNG（SillyTavern V2 嵌入 chara metadata）
+//   - JSON V3（SillyTavern chara_card_v3 格式）
+//   - PNG（SillyTavern V2/V3 嵌入 chara/ccv3 metadata）
+//
+// 完整提取：世界书 / 正则脚本 / 酒馆助手 / 变量系统
 // ============================================================
 
-import { Character } from "@/types/character";
+import { Character, CharacterCardData, TavernHelperScript } from "@/types/character";
+import type { WorldBookEntry } from "@/types/worldbook";
+import type { RegexScript } from "@/types/regex";
 
 let importIdCounter = 0;
 function genId(): string {
   return `imported_${Date.now()}_${++importIdCounter}`;
 }
 
+/** 从角色卡 JSON 提取 worldBook 数据 */
+function extractCharacterBook(raw: any): CharacterCardData["characterBook"] {
+  const book = raw?.data?.character_book || raw?.character_book;
+  if (!book?.entries?.length) return undefined;
+
+  const entries: WorldBookEntry[] = book.entries.map((e: any) => ({
+    id: String(e.id ?? Date.now() + Math.random()),
+    keys: e.keys || [],
+    secondaryKeys: e.secondary_keys || [],
+    content: e.content || "",
+    enabled: e.enabled !== false,
+    constant: e.constant || false,
+    selective: e.selective !== false,
+    priority: e.insertion_order ?? 0,
+    position: e.position === "before_char" ? "before" : e.position === "after_char" ? "after" : undefined,
+    comment: e.comment || "",
+    depth: e.extensions?.depth ?? undefined,
+  }));
+
+  return { name: book.name || "Character Book", entries };
+}
+
+/** 从角色卡 JSON 提取正则脚本 */
+function extractRegexScripts(raw: any): RegexScript[] {
+  const scripts = raw?.data?.extensions?.regex_scripts;
+  if (!scripts?.length) return [];
+
+  return scripts.map((s: any) => ({
+    id: s.id || `regex_${Date.now()}_${Math.random()}`,
+    name: s.scriptName || "Unnamed",
+    pattern: s.findRegex || "",
+    replacement: s.replaceString || "",
+    enabled: !s.disabled,
+    scope: s.promptOnly ? "output" : "both",
+    global: true,
+    caseInsensitive: s.substituteRegex !== 1,
+    runOn: s.promptOnly ? "after_receive" : "both",
+    group: "角色卡",
+    minDepth: s.minDepth ?? null,
+    maxDepth: s.maxDepth ?? null,
+    markdownOnly: s.markdownOnly ?? false,
+    placement: s.placement || [],
+  }));
+}
+
+/** 从角色卡 JSON 提取酒馆助手脚本 */
+function extractTavernHelper(raw: any): TavernHelperScript[] {
+  return raw?.data?.extensions?.tavern_helper?.scripts || [];
+}
+
+/** 从角色卡数据构建 systemPrompt */
+function buildSystemPrompt(raw: any): string {
+  const src = raw.spec === "chara_card_v2" || raw.spec === "chara_card_v3" ? raw.data : raw;
+  const parts: string[] = [];
+
+  // 角色描述
+  const desc = src.description || src.personality || "";
+  if (desc) parts.push(desc);
+
+  // 场景
+  const scenario = src.scenario || "";
+  if (scenario) parts.push(`[Scenario]\n${scenario}`);
+
+  // 系统提示词
+  const sp = src.system_prompt || "";
+  if (sp) parts.push(sp);
+
+  // 对话示例
+  const example = src.mes_example || "";
+  if (example) parts.push(`[对话示例]\n${example}`);
+
+  // 深度提示（作为角色底层指引）
+  const depthPrompt = src?.extensions?.depth_prompt?.prompt;
+  if (depthPrompt) parts.push(depthPrompt);
+
+  // 如果以上都为空，尝试从世界书提取核心规则构建系统提示词
+  if (parts.length === 0) {
+    const book = src?.character_book || raw?.character_book;
+    if (book?.entries?.length) {
+      const coreEntries = book.entries
+        .filter((e: any) => e.enabled !== false)
+        .sort((a: any, b: any) => (a.insertion_order || 0) - (b.insertion_order || 0));
+
+      // 提取核心规则条目（前几个高优先级常量条目）
+      for (const entry of coreEntries) {
+        const comment = entry.comment || "";
+        const isCore =
+          comment.includes("核心规则") ||
+          comment.includes("定义") ||
+          comment.includes("约束") ||
+          comment.includes("世界");
+
+        if (isCore || parts.length < 3) {
+          parts.push(entry.content || "");
+        }
+      }
+    }
+  }
+
+  return parts.join("\n\n");
+}
+
+/** 提取核心 cardData */
+function extractCardData(raw: any): CharacterCardData {
+  const src = raw.spec === "chara_card_v2" || raw.spec === "chara_card_v3" ? raw.data : raw;
+
+  return {
+    characterVersion: src.character_version || raw.character_version,
+    creator: src.creator || raw.creator,
+    creatorNotes: src.creator_notes || raw.creator_notes || raw.creatorcomment,
+    tags: src.tags || raw.tags || [],
+    spec: raw.spec,
+    specVersion: raw.spec_version,
+    alternateGreetings: src.alternate_greetings || [],
+    groupOnlyGreetings: src.group_only_greetings || [],
+    mesExample: src.mes_example || "",
+    characterBook: extractCharacterBook(raw),
+    embeddedRegexScripts: extractRegexScripts(raw),
+    tavernHelperScripts: extractTavernHelper(raw),
+    depthPrompt: src?.extensions?.depth_prompt || raw?.extensions?.depth_prompt,
+  };
+}
+
 /** 将任意来源的字符数据归一化为内部 Character 格式 */
 function normalize(raw: any): Character {
-  // V2: spec.chara_card_v2 → data.name
-  // V1: 扁平结构
-  // PNG: 同 V2 JSON
-  const src = raw.spec === "chara_card_v2" ? raw.data : raw;
+  const src = raw.spec === "chara_card_v2" || raw.spec === "chara_card_v3" ? raw.data : raw;
 
   const name = src.name || "Unknown";
   const description = src.description || src.personality || "";
-  const systemPrompt = src.system_prompt || src.post_history_instructions || "";
+  const systemPrompt = buildSystemPrompt(raw);
   const greeting = src.first_mes || src.greeting || "";
+  const cardData = extractCardData(raw);
 
   return {
     id: genId(),
@@ -32,6 +158,7 @@ function normalize(raw: any): Character {
     description,
     systemPrompt,
     greeting,
+    cardData,
   };
 }
 
@@ -83,7 +210,7 @@ export async function parsePngFile(file: File): Promise<Character> {
       const keyword = new TextDecoder().decode(bytes.slice(dataStart, nullPos));
       const value = new TextDecoder().decode(bytes.slice(nullPos + 1, dataEnd));
 
-      if (keyword === "chara" && value) {
+      if (keyword === "chara" || keyword === "ccv3") {
         const raw = JSON.parse(value);
         return normalize(raw);
       }
